@@ -37,7 +37,7 @@ type InterceptPending struct {
 	ToolInput      json.RawMessage `json:"tool_input"`
 	Status         string          `json:"status"`
 	DecisionSource string          `json:"decision_source"`
-	Reason         string          `json:"reason"` // 规则 message 或模型判定理由(前缀 [模型])
+	Reason         string          `json:"reason"` // the rule's message, or the model's judgment reason (prefixed with "[model]"; historical rows may carry the legacy "[模型]" prefix)
 	DecidedAt      *time.Time      `json:"decided_at"`
 	CreatedAt      time.Time       `json:"created_at"`
 }
@@ -226,9 +226,13 @@ func scanInterceptApprovalRow(rows interface{ Scan(...any) error }, r *Intercept
 }
 
 // Keep legacy rows without decision_source consistent with their displayed source.
+// "[模型]" is the legacy Chinese prefix used by rows written before the judge's
+// output was translated to English; match both prefixes so historical decisions
+// keep classifying as "model". All new writes use the English "[model]" prefix
+// (see intercept.Judge and interceptSource below).
 const approvalDecisionSource = `COALESCE(NULLIF(ip.decision_source,''), CASE
  WHEN ip.rule_id IS NOT NULL THEN 'rule'
- WHEN ip.reason LIKE '[模型]%' THEN 'model' ELSE 'unknown' END)`
+ WHEN ip.reason LIKE '[model]%' OR ip.reason LIKE '[模型]%' THEN 'model' ELSE 'unknown' END)`
 
 const approvalRowColumns = `ip.id, ip.rule_id, ip.conversation_id, ip.task_id, ip.agent_name,
        ip.tool_name, ip.tool_input, ip.status, ip.reason, ip.decided_at, ip.created_at, ` + approvalDecisionSource + `,
@@ -248,7 +252,9 @@ func interceptSource(ruleID int64, reason string) string {
 	if ruleID != 0 {
 		return "rule"
 	}
-	if strings.HasPrefix(reason, "[模型]") {
+	// "[模型]" is kept only for backward compatibility with rows written before
+	// the judge's output was translated to English; all new writes use "[model]".
+	if strings.HasPrefix(reason, "[model]") || strings.HasPrefix(reason, "[模型]") {
 		return "model"
 	}
 	return "unknown"

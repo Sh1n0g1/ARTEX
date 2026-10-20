@@ -80,17 +80,20 @@ func (c *Compactor) OnPlannerRound(ctx context.Context, ts *db.ExplorationStore)
 		return
 	}
 	if !c.tryStart(ts.ID()) {
-		return // already running, or within cooldown —派生态最终一致，下轮再压
+		return // already running, or within cooldown — derived state is eventually consistent, compact again next round
 	}
 	go func() {
 		defer c.finish(ts.ID())
 		bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.maxDur)
 		defer cancel()
-		// 压缩是裸 provider 调用（compress 里直接 prov.Complete），不经过 agentcore
-		// 的会话循环，所以 ctx 上没有 session id；按 session-id 头做提示缓存/粘性
-		// 路由的网关（opencode zen 缺 x-opencode-session 直接 400）就收不到该头。
-		// 这里补一个按探索稳定的 id：同一探索的所有压缩请求共享它，既能带上头，
-		// 也让 llmrec 能把这次调用的 token 归因回该探索（此前记不到）。
+		// Compression is a bare provider call (compress calls prov.Complete directly)
+		// that bypasses agentcore's session loop, so ctx carries no session id; a
+		// gateway that does prompt caching/sticky routing by session-id header
+		// (opencode zen returns a flat 400 when x-opencode-session is missing) never
+		// gets that header. Attach a stable per-exploration id here: every compaction
+		// request for the same exploration shares it, which both supplies the header
+		// and lets llmrec attribute this call's tokens back to the exploration
+		// (previously unattributable).
 		bg = transcript.WithSessionID(bg, fmt.Sprintf("exp%d-compactor", ts.ID()))
 		if needMajor {
 			c.major(bg, ts)
@@ -188,7 +191,7 @@ func (c *Compactor) minor(ctx context.Context, ts *db.ExplorationStore) {
 }
 
 // major re-derives the whole grouping from source over ALL eligible-cold nodes
-// (§5.1 回源重压), then reconciles against the active digests by signature:
+// (§5.1 re-derive-from-source), then reconciles against the active digests by signature:
 // unchanged blocks keep their digest (no LLM), stale digests are superseded, and
 // new/changed blocks are compressed afresh. This is where tiered fragments of one
 // direction merge and where "later became connected" blocks unify (§5.2).
@@ -281,9 +284,9 @@ func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *c
 	}
 }
 
-// generationFor computes a digest's重摘代次 (§1): 1 for a fresh fold; for a major
-// merge, max(generation) over the active digests that overlap this block's
-// members, +1.
+// generationFor computes a digest's re-digest generation (§1): 1 for a fresh fold;
+// for a major merge, max(generation) over the active digests that overlap this
+// block's members, +1.
 func (c *Compactor) generationFor(b block, active []*db.Node) int {
 	if len(active) == 0 {
 		return 1
@@ -455,14 +458,14 @@ func nodeConfidence(n *db.Node) string {
 // buildCompressionInput renders the connected sub-graph for the §4 prompt:
 // member nodes (summary + id + kind + state + confidence), the internal blood
 // edges among members, and — for a §3.1 shared-parent group — the anchor parents
-// as context ("共同父 #p"), which are NOT members.
+// as context ("common parent #p"), which are NOT members.
 func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) string {
 	memberSet := make(map[int64]bool, len(b.Members))
 	for _, m := range b.Members {
 		memberSet[m] = true
 	}
 	var sb strings.Builder
-	sb.WriteString("【成员节点（要压缩的）】：\n")
+	sb.WriteString("[MEMBER NODES (to be compressed)]:\n")
 	for _, m := range b.Members {
 		n := nodeByID[m]
 		kind := "fact"
@@ -485,18 +488,18 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 	for _, m := range b.Members {
 		for _, to := range g.children[m] {
 			if memberSet[to] {
-				edgeLines = append(edgeLines, fmt.Sprintf("- #%d 产出/派生→ #%d", m, to))
+				edgeLines = append(edgeLines, fmt.Sprintf("- #%d produced/derived→ #%d", m, to))
 			}
 		}
 	}
 	if len(edgeLines) > 0 {
-		sb.WriteString("\n【成员之间的血缘边（父→子）】：\n")
+		sb.WriteString("\n[LINEAGE EDGES AMONG MEMBERS (parent→child)]:\n")
 		sort.Strings(edgeLines)
 		sb.WriteString(strings.Join(edgeLines, "\n"))
 		sb.WriteByte('\n')
 	}
 	if len(b.Anchors) > 0 {
-		sb.WriteString("\n【共同父 / 上下文锚（不是成员，只用于理解这些结果从哪个意图探出）】：\n")
+		sb.WriteString("\n[COMMON PARENT / CONTEXT ANCHOR (not a member, only for understanding which intent these results came from)]:\n")
 		for _, a := range b.Anchors {
 			n := nodeByID[a]
 			state := ""
@@ -530,19 +533,19 @@ func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByI
 }
 
 // compressionSystemPrompt is the §4 body prompt.
-const compressionSystemPrompt = `你在压缩一组【彼此关联】的探索节点，产出一段综合结论(body)，供规划者快速掌握"这一片已经探明了什么"。
+const compressionSystemPrompt = `You are compressing a group of [mutually related] exploration nodes, producing one synthesized conclusion (body) so the planner can quickly grasp "what this area has established so far".
 
-输入是一个连通子图：
-- 节点：每条是一个意图或事实的 summary（一句话），带 id、类型(intent/fact)、state、confidence(若有)。
-- 关系：节点之间的血缘边（A 派生自 B / A 产出 B），说明它们如何串联。
-- 若节点间没有直接血缘边、但同属一个上游意图（会另给出该上游意图作为"共同父 #p"），则按"这个意图（#p）探到了什么"来综合它们——共同父只是上下文锚、不是要压缩的成员。
+The input is a connected subgraph:
+- Nodes: each is an intent's or fact's summary (one sentence), with id, type (intent/fact), state, and confidence (if any).
+- Relationships: lineage edges between nodes (A is derived from B / A produced B), showing how they chain together.
+- If nodes have no direct lineage edge but share a common upstream intent (that upstream intent will be given separately as a "common parent #p"), synthesize them around "what this intent (#p) found" — the common parent is only a context anchor, not a member to compress.
 
-据此写一段 body：
-1. 综合、不罗列：顺着关系把因果串起来（哪个事实催生哪个意图、哪条意图产出了哪个结论），讲成"这一片探索得出了什么"，不要把每条 summary 抄一遍。
-2. 保留区分度：彼此不同的结论分别说清，别揉成一句笼统的话。
-3. 保留证据强度：带 confidence 的结论标出 observed / inferred；inferred 的否定/存疑结论要点明它只是推断、可复核，别写成定论。
-4. 带上 id：每条结论后标注来源节点 id（如"…（#12,#28）"），让规划者能按 id 还原原节点。
-5. 正向陈述、只写输入里有的：不脑补、不引入输入中没有的判断。
-6. 长度随内容自适应：结论少就短，多且互不相同就写够——但整体显著短于所有输入 summary 的总和。
+Based on this, write a body:
+1. Synthesize, don't list: follow the relationships to string the causality together (which fact gave rise to which intent, which intent produced which conclusion), framing it as "what this area of exploration established" — don't just copy out each summary.
+2. Preserve distinctions: state differing conclusions separately and clearly; don't blur them into one vague sentence.
+3. Preserve evidence strength: for conclusions with a confidence, label them observed / inferred; for an inferred negative/uncertain conclusion, make clear it's only an inference and reviewable — don't state it as settled fact.
+4. Include ids: tag each conclusion with its source node id(s) (e.g. "...(#12,#28)"), so the planner can trace back to the original nodes by id.
+5. State only what's affirmatively in the input: don't speculate or introduce a judgment that isn't in the input.
+6. Let the length adapt to the content: keep it short when there's little to conclude, and write enough when there's a lot that differs — but overall it should be noticeably shorter than the sum of all input summaries.
 
-只输出 body 正文本身。`
+Output only the body text itself.`

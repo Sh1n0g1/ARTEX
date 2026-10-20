@@ -1,0 +1,32 @@
+48:   spawns: "派生",
+49:   derived_from: "意图链",
+50:   yields: "产出",
+51:   proves: "证明",
+70:   task: { label: "根任务", icon: Flag, iconBg: "bg-slate-500", chip: "bg-slate-500/15 text-slate-600 dark:text-slate-300", hex: "#64748b" },
+71:   begin: { label: "起点", icon: Flag, iconBg: "bg-slate-500", chip: "bg-slate-500/15 text-slate-600 dark:text-slate-300", hex: "#64748b" },
+72:   goal: { label: "目标", icon: Target, iconBg: "bg-emerald-500", chip: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400", hex: "#10b981" },
+73:   hint: { label: "提示", icon: Lightbulb, iconBg: "bg-violet-500", chip: "bg-violet-500/15 text-violet-600 dark:text-violet-400", hex: "#8b5cf6" },
+74:   intent: { label: "意图", icon: Compass, iconBg: "bg-blue-500", chip: "bg-blue-500/15 text-blue-600 dark:text-blue-400", hex: "#3b82f6" },
+75:   fact: { label: "事实", icon: FlaskConical, iconBg: "bg-amber-500", chip: "bg-amber-500/15 text-amber-600 dark:text-amber-400", hex: "#f59e0b" },
+76:   finding: { label: "漏洞", icon: Bug, iconBg: "bg-rose-500", chip: "bg-rose-500/15 text-rose-600 dark:text-rose-400", hex: "#f43f5e" },
+77:   digest: { label: "压缩", icon: Layers, iconBg: "bg-teal-500", chip: "bg-teal-500/15 text-teal-600 dark:text-teal-400", hex: "#14b8a6" },
+80: // The task root is an origin fact (kind='fact', state='origin'); render it as "起点".
+113:       /* 非 JSON：原样显示 */
+342:             <Badge variant="outline" className="max-w-32 truncate" title={`继承自任务 #${n.source_task_id}，只读`}>
+343:               来源 #{n.source_task_id}
+414:                     来源任务 #{node.source_task_id} · 只读
+423:                   <h4 className="text-muted-foreground mb-1 text-xs font-medium">属性</h4>
+424:                   <DetailRow label="类型">{meta.label}</DetailRow>
+425:                   <DetailRow label="状态">
+432:                   <DetailRow label="优先级">
+435:                   <DetailRow label="来源">
+439:                     <DetailRow label="来源任务">
+440:                       <span className="font-mono text-xs">#{node.source_task_id}（继承，只读）</span>
+443:                   <DetailRow label="时间">{new Date(node.ts).toLocaleString("zh-CN")}</DetailRow>
+450:                         <h4 className="text-muted-foreground mb-1.5 text-xs font-medium">压缩结论</h4>
+458:                         压缩的节点（{memberIds.length}）
+487:                             另有 {memberIds.length - members.length} 个成员节点未随当前图加载
+497:                     <h4 className="text-muted-foreground text-xs font-medium">原始数据</h4>
+499:                       {copied ? "已复制" : "复制"}
+521:   emptyHint = "暂无探索数据",
+643: // ExplorationGraph is the shared探索图/攻击链路图 canvas — used by the task graph

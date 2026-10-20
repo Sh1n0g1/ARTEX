@@ -1,0 +1,5 @@
+ARTEX tool admin password:
+Artex-ctf-64f405fb89fa16dc
+
+shinoCTF player ARTEX password:
+ARTEX / Artex-ef16f75aea37

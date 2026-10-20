@@ -1,70 +1,81 @@
 # syntax=docker/dockerfile:1
 #
-# 多阶段构建：前端静态导出 → Go 单二进制（内嵌前端）→ 运行镜像。
-# 原 Docker Hub 镜像源（autumn27/artex）已失效，本仓库自此支持从纯源码自助构建：
-#   docker compose build        # 或 docker build -t artex:local .
-# TARGETARCH 由 buildx 自动注入（amd64/arm64），Go 交叉编译无需 QEMU；
-# 运行层只装工具，编译全部在构建阶段完成。
-# 国内网络可覆盖模块源（默认已对国内友好）：
+# Multi-stage build: frontend static export -> single Go binary (frontend embedded) -> runtime image.
+# The original Docker Hub image source (autumn27/artex) is gone; this repo now supports self-service
+# builds straight from source:
+#   docker compose build        # or docker build -t artex:local .
+# TARGETARCH is injected automatically by buildx (amd64/arm64), so Go cross-compilation needs no QEMU;
+# the runtime layer only installs tools — all compilation happens in the build stages.
+# Module sources can be overridden for networks behind the Great Firewall (defaults are already
+# friendly to mainland China):
 #   --build-arg GOPROXY=https://goproxy.cn,direct
 #   --build-arg NPM_REGISTRY=https://registry.npmmirror.com
 
-########## 阶段 1：前端静态导出 ##########
+########## Stage 1: frontend static export ##########
 FROM node:20-bookworm AS web
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 WORKDIR /web
-# --ignore-scripts：跳过 prepare(husky)——容器里没有 .git，husky 会失败；
-# Next.js/Biome 的平台二进制走 optionalDependencies，不依赖生命周期脚本。
+# --ignore-scripts: skip prepare (husky) -- there's no .git in the container, so husky would fail;
+# Next.js/Biome platform binaries go through optionalDependencies and don't rely on lifecycle scripts.
 COPY web/package.json web/package-lock.json ./
 RUN npm config set registry "$NPM_REGISTRY" && npm ci --ignore-scripts
 COPY web/ ./
 RUN NEXT_EXPORT=1 npm run build:static
 
-########## 阶段 2：Go 后端（内嵌前端，静态编译）##########
+########## Stage 2: Go backend (frontend embedded, statically compiled) ##########
 FROM golang:1.26-bookworm AS gobuild
 ARG TARGETARCH
 ARG GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct
 WORKDIR /src
 COPY go.mod go.sum ./
+# go.mod uses a replace directive pointing at local ./norma, so its module files must be in place
+# before downloading dependencies
+COPY norma/go.mod norma/go.sum ./norma/
 RUN go mod download
 COPY . .
-# 前端静态产物从 web 阶段拷入（.dockerignore 已排除宿主 dist，不会冲突）
+# Frontend static output is copied in from the web stage (.dockerignore already excludes the host's
+# dist, so there's no conflict)
 COPY --from=web /web/out/ server/webui/dist/
 RUN CGO_ENABLED=0 GOARCH="${TARGETARCH}" go build -tags embedui -trimpath -o /out/artex ./cmd/artex
 
-########## 阶段 3：运行镜像（同原版：工具 + Playwright 预装）##########
+########## Stage 3: runtime image (same as before: tools + Playwright preinstalled) ##########
 FROM python:3.12-slim-bookworm
 ARG NPM_REGISTRY=https://registry.npmmirror.com
-# 运行层的全局 npm 装包与 chromium 下载同样走国内源（对全球网络同样可达）
+# Global npm installs and the chromium download in the runtime layer also go through the mirror
+# (still reachable from networks outside mainland China)
 ENV npm_config_registry=$NPM_REGISTRY \
     PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright
-# 常用工具：ripgrep / curl / vim，加一批 recon 常备件（按需增删）。
-# Node 从 NodeSource 装 20.x：bookworm 自带的 apt nodejs 是 18，Playwright 要求 >=20。
+# Common tools: ripgrep / curl / vim, plus a set of recon staples (add/remove as needed).
+# Node is installed from NodeSource at 20.x: bookworm's apt nodejs is 18, and Playwright requires >=20.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates ripgrep curl wget vim git jq unzip \
       dnsutils iputils-ping netcat-openbsd inetutils-telnet whois nmap \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
-# 预装 Playwright MCP 与 CLI（全局），运行时不再 npx 联网下载。
-# @playwright/mcp：browser MCP 直接 `npx @playwright/mcp`（已全局装好，无需 -y/@latest）。
-# @playwright/cli：提供 playwright-cli，装完顺带 --help 验证可执行。
-# 再装 playwright（提供浏览器管理），装完用 --with-deps 预置 chromium 及其系统依赖，
-# 这样容器内 MCP/CLI 首次启动即可用，不再联网下载浏览器。
+# Preinstall Playwright MCP and CLI (globally) so there's no npx network download at runtime.
+# @playwright/mcp: browser MCP can run `npx @playwright/mcp` directly (already installed globally,
+# no need for -y/@latest).
+# @playwright/cli: provides playwright-cli; run --help right after install to confirm it works.
+# Then install playwright (provides browser management) and use --with-deps to preinstall chromium
+# and its system dependencies, so the MCP/CLI works on first launch in the container with no
+# browser download needed over the network.
 RUN npm install -g @playwright/mcp@latest @playwright/cli@latest playwright@latest \
     && playwright-cli --help \
     && playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-# 构建阶段产出的单二进制（内嵌前端）
+# Single binary produced by the build stage (frontend embedded)
 COPY --from=gobuild /out/artex /app/artex
-# 守护启动脚本：进程退出后按退出码决定是否重新拉起，页面一键更新靠它完成换装。
-# 它同时负责把 SIGTERM 转发给 artex —— docker stop 只把信号发给 PID 1，
-# 不转发的话 artex 收不到、做不了优雅关闭，10 秒后被 SIGKILL 硬杀。
+# Supervising startup script: after the process exits, it decides whether to relaunch it based on
+# the exit code, which is how the one-click update button in the UI completes a swap.
+# It's also responsible for forwarding SIGTERM to artex -- docker stop only sends the signal to
+# PID 1, and without forwarding, artex never receives it, can't shut down gracefully, and gets
+# hard-killed by SIGKILL after 10 seconds.
 COPY start.sh /app/start.sh
 RUN chmod +x /app/artex /app/start.sh
 COPY skills/ /app/skills/
-# data/（SQLite + jwt.key）持久化点
+# data/ (SQLite + jwt.key) persistence mount point
 VOLUME ["/app/data"]
 EXPOSE 8787 8788
 ENTRYPOINT ["/app/start.sh"]

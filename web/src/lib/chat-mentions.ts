@@ -1,13 +1,13 @@
 export const mentionKinds = [
-  { kind: "finding", label: "漏洞", alias: "finding" },
-  { kind: "asset", label: "资产", alias: "asset" },
-  { kind: "company", label: "企业", alias: "company" },
-  { kind: "endpoint", label: "接口", alias: "api" },
+  { kind: "finding", label: "Finding", alias: "finding" },
+  { kind: "asset", label: "Asset", alias: "asset" },
+  { kind: "company", label: "Company", alias: "company" },
+  { kind: "endpoint", label: "Endpoint", alias: "api" },
   { kind: "ip", label: "IP", alias: "ip" },
-  { kind: "app", label: "应用", alias: "app" },
-  { kind: "root_domain", label: "域名", alias: "domain" },
-  { kind: "subdomain", label: "子域名", alias: "subdomain" },
-  { kind: "service", label: "服务", alias: "service" },
+  { kind: "app", label: "App", alias: "app" },
+  { kind: "root_domain", label: "Root domain", alias: "domain" },
+  { kind: "subdomain", label: "Subdomain", alias: "subdomain" },
+  { kind: "service", label: "Service", alias: "service" },
 ] as const;
 
 export type MentionKind = (typeof mentionKinds)[number]["kind"];
@@ -43,7 +43,7 @@ export function mentionSearch(query: string) {
 }
 
 export function mentionToken(item: ChatMention) {
-  const kind = mentionKinds.find((entry) => entry.kind === item.kind)?.label ?? "资产";
+  const kind = mentionKinds.find((entry) => entry.kind === item.kind)?.label ?? "Asset";
   const label = item.label
     .replace(/[[\]]/g, (char) => (char === "[" ? "（" : "）"))
     .replace(/\s+/g, " ")
@@ -51,12 +51,18 @@ export function mentionToken(item: ChatMention) {
   return `@[${kind}#${item.id} ${label}]`;
 }
 
+// Mention tokens used to embed Chinese labels (漏洞/资产/企业/接口/应用/域名/子域名/服务).
+// Labels are now English (Finding/Asset/Company/Endpoint/App/Root domain/Subdomain/Service),
+// but messages saved before this translation may still contain the old Chinese-labeled
+// tokens, so this pattern matches either form for each kind to keep that history parseable.
 export function selectedMentions(value: string) {
-  return [...value.matchAll(/@\[(漏洞|资产|企业|接口|IP|应用|域名|子域名|服务)#([0-9]+)(?: ([^\]\r\n]*))?\]/g)].map(
-    (match) => ({
-      token: match[0],
-      label: `${match[1]} #${match[2]}${match[3] ? ` · ${match[3]}` : ""}`,
-      start: match.index,
-    }),
-  );
+  return [
+    ...value.matchAll(
+      /@\[(漏洞|Finding|资产|Asset|企业|Company|接口|Endpoint|IP|应用|App|域名|Root domain|子域名|Subdomain|服务|Service)#([0-9]+)(?: ([^\]\r\n]*))?\]/g,
+    ),
+  ].map((match) => ({
+    token: match[0],
+    label: `${match[1]} #${match[2]}${match[3] ? ` · ${match[3]}` : ""}`,
+    start: match.index,
+  }));
 }
